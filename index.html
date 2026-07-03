@@ -1,0 +1,1452 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <!-- Responsive viewport: required for the mobile drawer + touch-target CSS to work correctly -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Decipher Marker Builder Pro</title>
+
+  <!-- ==========================================================================
+       EXTERNAL DEPENDENCIES
+       - SheetJS (xlsx): parses/writes Excel & CSV files entirely in the browser.
+         No server needed — all data stays on the user's machine (privacy win).
+       - Tailwind CDN: JIT-compiles utility classes at runtime.
+         NOTE: CDN build is for prototyping; for production, use a compiled build.
+       ========================================================================== -->
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- ==========================================================================
+       DYNAMIC TAILWIND CONFIGURATION
+       Maps semantic class names (e.g. `bg-theme-card`) to CSS custom properties
+       (e.g. `var(--card)`). This is the KEY to the theming system:
+       switching themes only rewrites CSS variables on <html> — no classes
+       change and no re-render is required. Colors update instantly everywhere.
+       ========================================================================== -->
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          screens: { 'xs': '480px' },                                // extra-small breakpoint for phones
+          boxShadow: { '2xs': '0 1px 2px 0 rgba(0, 0, 0, 0.05)' },   // subtle card shadow
+          colors: {
+            theme: {
+              // Every color below resolves to a CSS variable set by ThemeEngine
+              bg: 'var(--bg)',                       // page background
+              'bg-soft': 'var(--bg-soft)',           // slightly raised background (inputs, chips)
+              card: 'var(--card)',                   // panel/card surfaces
+              text: 'var(--text)',                   // primary text
+              muted: 'var(--muted)',                 // secondary/dim text
+              border: 'var(--border)',               // dividers & outlines
+              primary: 'var(--primary)',             // brand/action color
+              'primary-hover': 'var(--primary-hover)',
+              'primary-light': 'var(--primary-light)', // tinted backgrounds for highlights
+              'input-bg': 'var(--input-bg)',
+              'table-header': 'var(--table-header)',
+              hover: 'var(--hover)',                 // row hover state
+              success: 'var(--success)',             // green semantic (hits, confirmations)
+              'success-bg': 'var(--success-bg)',
+              warning: 'var(--warning)',             // amber semantic (diagnostics)
+              'warning-bg': 'var(--warning-bg)',
+              cross: 'var(--cross)',                 // purple semantic (crossed-quota features)
+              'cross-bg': 'var(--cross-bg)',
+            }
+          }
+        }
+      }
+    }
+  </script>
+
+  <style>
+    /* ------------------------------------------------------------------------
+       BASE TYPOGRAPHY
+       System font stack = zero download, native look per OS.
+       .mono is applied to code-like content (column names, marker paths, XML).
+       ------------------------------------------------------------------------ */
+    html, body { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+
+    /* Themed scrollbars — thumb color comes from the active theme's variables */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: var(--primary); }
+
+    /* ------------------------------------------------------------------------
+       MOBILE DRAWER ANIMATIONS
+       The drawer is animated with CSS classes toggled by JS (Navigation module):
+       - .off-screen slides the panel fully left (translateX(-100%))
+       - .hidden-backdrop fades the backdrop out and disables clicks
+       - body.sidebar-open locks page scroll while the drawer is open
+       ------------------------------------------------------------------------ */
+    .sidebar-backdrop { transition: opacity 0.25s ease; }
+    .sidebar-panel { transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1); }
+    .sidebar-backdrop.hidden-backdrop { opacity: 0; pointer-events: none; }
+    .sidebar-panel.off-screen { transform: translateX(-100%); }
+    body.sidebar-open { overflow: hidden; }
+
+    /* Hide scrollbars on the horizontally-scrollable tab bar (still scrollable via swipe) */
+    .tabs-scroll { scrollbar-width: none; -ms-overflow-style: none; }
+    .tabs-scroll::-webkit-scrollbar { display: none; }
+
+    /* ------------------------------------------------------------------------
+       TOUCH TARGET SIZING (WCAG 2.1 AA)
+       On coarse pointers (touchscreens), interactive elements get a minimum
+       44px hit area so they're comfortably tappable.
+       ------------------------------------------------------------------------ */
+    @media (pointer: coarse) {
+      button, select, input[type="file"] + label, .touch-target { min-height: 44px; }
+      input[type="checkbox"] { min-width: 20px; min-height: 20px; }
+    }
+
+    /* ------------------------------------------------------------------------
+       TABLE SCROLL HINT
+       A right-edge gradient (::after pseudo-element) signals "more columns
+       to the right". Fades from the card color so it works in every theme.
+       ------------------------------------------------------------------------ */
+    .table-scroll-hint::after {
+      content: ''; position: absolute; right: 0; top: 0; bottom: 0; width: 24px;
+      background: linear-gradient(to left, var(--card), transparent);
+      pointer-events: none; /* never blocks clicks on cells beneath it */
+    }
+    .scrolled-end::after { display: none; }
+
+    /* Toast slides up from the bottom-right; removal is animated inline via JS */
+    @keyframes slideInToast {
+      from { transform: translateY(100%); opacity: 0; }
+      to { transform: translateY(0); opacity: 1; }
+    }
+    .toast-item { animation: slideInToast 0.25s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+  </style>
+</head>
+
+<!-- selection: classes theme the text-highlight color to match the brand -->
+<body class="bg-theme-bg text-theme-text text-sm antialiased transition-colors duration-200 selection:bg-theme-primary selection:text-white">
+
+  <!-- =========================================================================
+       GLOBAL OVERLAYS & MODALS
+       z-index layering strategy:
+         header(30) < backdrop(40) < drawer(50) < drop-overlay(70) < toasts(80)
+       ========================================================================= -->
+
+  <!-- Drag & Drop Overlay: shown by JS when a file is dragged over the window.
+       pointer-events-none lets the 'drop' event pass through to window. -->
+  <div id="dropOverlay" class="hidden fixed inset-0 z-[70] items-center justify-center bg-theme-bg/80 backdrop-blur-sm pointer-events-none transition-all">
+    <div class="mx-4 flex flex-col items-center gap-4 rounded-3xl border-2 border-dashed border-theme-primary bg-theme-card px-12 py-10 shadow-2xl">
+      <svg class="h-16 w-16 animate-bounce text-theme-primary" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M12 16.5V9.75m0 0l3 3m-3-3l-3 3M6.75 19.5a4.5 4.5 0 01-1.41-8.775 5.25 5.25 0 0110.233-2.33 3 3 0 013.758 3.848A3.748 3.748 0 0118 19.5H6.75z" />
+      </svg>
+      <span class="text-xl font-bold text-theme-primary">Drop File to Load</span>
+    </div>
+  </div>
+
+  <!-- Toast Container:
+       aria-live="polite" makes screen readers announce new toasts without
+       interrupting the user. pointer-events-none on the container (but
+       pointer-events-auto on each toast) lets clicks pass through empty space. -->
+  <div id="toastContainer" aria-live="polite" aria-atomic="true" class="fixed bottom-4 right-4 z-[80] flex flex-col gap-2 pointer-events-none max-w-sm w-full px-2"></div>
+
+  <!-- Mobile Sidebar Backdrop: clicking it closes the drawer. lg:hidden = desktop never sees it. -->
+  <div id="sidebarBackdrop" class="sidebar-backdrop hidden-backdrop fixed inset-0 z-40 bg-black/60 backdrop-blur-2xs lg:hidden" onclick="App.Navigation.closeSidebar()"></div>
+
+  <!-- Mobile Sidebar Drawer:
+       width = min(88vw, 380px) → never covers the full screen on phones.
+       overscroll-contain prevents scroll-chaining to the page behind it.
+       #mobileSidebarContent is filled by JS with the SAME sidebar component
+       used on desktop (single source of truth, rendered into two slots). -->
+  <div id="sidebarPanel" aria-label="Configuration Drawer" role="region" class="sidebar-panel off-screen fixed inset-y-0 left-0 z-50 w-[min(88vw,380px)] overflow-y-auto overscroll-contain bg-theme-card p-3 pb-24 shadow-2xl lg:hidden border-r border-theme-border">
+    <div class="mb-3 flex items-center justify-between border-b border-theme-border pb-2.5">
+      <div class="flex items-center gap-2">
+        <span class="text-base" aria-hidden="true">⚙️</span>
+        <h2 class="text-sm font-bold text-theme-text">Configuration Panel</h2>
+      </div>
+      <button onclick="App.Navigation.closeSidebar()" class="rounded-lg p-1.5 text-theme-muted hover:bg-theme-bg-soft hover:text-theme-text focus:outline-none focus:ring-2 focus:ring-theme-primary" aria-label="Close drawer">
+        <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div id="mobileSidebarContent"></div>
+  </div>
+
+  <!-- =========================================================================
+       HEADER — sticky, semi-transparent with blur (glassmorphism)
+       ========================================================================= -->
+  <header class="sticky top-0 z-30 border-b border-theme-border bg-theme-card/95 backdrop-blur-md shadow-2xs transition-colors duration-200">
+    <div class="mx-auto flex max-w-7xl items-center justify-between gap-3 px-3 py-2 sm:px-4">
+
+      <!-- Brand block + hamburger (hamburger only visible below lg AND when a file is loaded — toggled by JS) -->
+      <div class="flex items-center gap-2.5 min-w-0">
+        <button id="sidebarToggle" onclick="App.Navigation.openSidebar()" class="hidden rounded-lg border border-theme-border p-1.5 text-theme-text hover:bg-theme-bg-soft lg:hidden touch-target focus:outline-none focus:ring-2 focus:ring-theme-primary" title="Open setup menu" aria-label="Open setup menu">
+          <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+        </button>
+        <div class="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-theme-primary text-white shadow-sm">
+          <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z"/>
+          </svg>
+        </div>
+        <div class="min-w-0 leading-tight">
+          <div class="flex items-center gap-2">
+            <h1 class="truncate text-sm font-bold tracking-tight text-theme-text sm:text-base">Decipher Marker Builder</h1>
+            <span class="hidden rounded-md bg-theme-primary-light px-1.5 py-0.5 text-[10px] font-bold text-theme-primary border border-theme-primary/30 sm:inline-block">PRO</span>
+          </div>
+          <p class="hidden text-[11px] text-theme-muted xs:block">Smart Column Detection · Auto-Map Quotas · Crossed Segments</p>
+        </div>
+      </div>
+
+      <!-- Right side: dynamic action buttons (rendered by JS) + theme picker -->
+      <div class="flex shrink-0 items-center gap-2">
+        <!-- #headerActions is populated by Components.renderHeaderActions()
+             because its contents depend on app state (file loaded? processed?) -->
+        <div id="headerActions" class="flex items-center gap-2"></div>
+
+        <select id="themeSelector" onchange="ThemeEngine.applyTheme(this.value)" class="rounded-lg border border-theme-border bg-theme-input-bg px-2.5 py-1.5 text-xs font-semibold text-theme-text outline-none transition-colors focus:ring-2 focus:ring-theme-primary touch-target" title="Select UI Theme">
+          <option value="light">☀️ Light</option>
+          <option value="midnight">🌙 Midnight</option>
+          <option value="ocean">🌊 Ocean</option>
+          <option value="forest">🌲 Forest</option>
+          <option value="sunset">🌅 Sunset</option>
+          <option value="rose">🌹 Rose</option>
+          <option value="slate">🛡️ Slate</option>
+        </select>
+      </div>
+    </div>
+  </header>
+
+  <!-- MAIN WORKSPACE: entire app UI is rendered into this element by App.Render() -->
+  <main id="app" class="mx-auto max-w-7xl px-2.5 py-4 sm:px-4 lg:px-6"></main>
+
+  <script>
+  /* ===========================================================================
+     1. SEMANTIC THEME ENGINE
+     Each theme is a flat object of CSS custom properties. Because Tailwind
+     classes point at var(--x), applying a theme = writing variables onto
+     document.documentElement — instant, global, zero re-render.
+     =========================================================================== */
+  const THEMES = {
+    light: {
+      '--bg': '#f8fafc', '--bg-soft': '#f1f5f9', '--card': '#ffffff', '--text': '#0f172a', '--muted': '#64748b', '--border': '#e2e8f0',
+      '--primary': '#4f46e5', '--primary-hover': '#4338ca', '--primary-light': '#eef2ff', '--input-bg': '#f8fafc', '--table-header': '#f1f5f9', '--hover': '#f8fafc',
+      '--success': '#15803d', '--success-bg': '#dcfce7', '--warning': '#b45309', '--warning-bg': '#fef3c7', '--cross': '#7e22ce', '--cross-bg': '#f3e8ff'
+    },
+    midnight: {
+      '--bg': '#020617', '--bg-soft': '#0b0f19', '--card': '#0f172a', '--text': '#f8fafc', '--muted': '#94a3b8', '--border': '#1e293b',
+      '--primary': '#6366f1', '--primary-hover': '#4f46e5', '--primary-light': 'rgba(99, 102, 241, 0.15)', '--input-bg': '#1e293b', '--table-header': '#131e36', '--hover': '#162032',
+      '--success': '#4ade80', '--success-bg': 'rgba(74, 222, 128, 0.12)', '--warning': '#fbbf24', '--warning-bg': 'rgba(251, 191, 36, 0.12)', '--cross': '#c084fc', '--cross-bg': 'rgba(192, 132, 252, 0.15)'
+    },
+    ocean: {
+      '--bg': '#041f31', '--bg-soft': '#082f49', '--card': '#0c4a6e', '--text': '#e0f7fa', '--muted': '#7dd3fc', '--border': '#0284c7',
+      '--primary': '#00bcd4', '--primary-hover': '#26c6da', '--primary-light': 'rgba(0, 188, 212, 0.15)', '--input-bg': '#073c5c', '--table-header': '#073a5a', '--hover': '#0a4366',
+      '--success': '#34d399', '--success-bg': 'rgba(52, 211, 153, 0.15)', '--warning': '#facc15', '--warning-bg': 'rgba(250, 204, 21, 0.15)', '--cross': '#38bdf8', '--cross-bg': 'rgba(56, 189, 248, 0.2)'
+    },
+    forest: {
+      '--bg': '#052e16', '--bg-soft': '#0f3d20', '--card': '#0a3d1c', '--text': '#e8f5e9', '--muted': '#86efac', '--border': '#15803d',
+      '--primary': '#22c55e', '--primary-hover': '#4ade80', '--primary-light': 'rgba(34, 197, 94, 0.15)', '--input-bg': '#0e4622', '--table-header': '#0c4420', '--hover': '#0f4823',
+      '--success': '#4ade80', '--success-bg': 'rgba(74, 222, 128, 0.2)', '--warning': '#fde047', '--warning-bg': 'rgba(253, 224, 71, 0.15)', '--cross': '#86efac', '--cross-bg': 'rgba(134, 239, 172, 0.18)'
+    },
+    sunset: {
+      '--bg': '#2b1002', '--bg-soft': '#451a03', '--card': '#5c2406', '--text': '#fef3c7', '--muted': '#fcd34d', '--border': '#b45309',
+      '--primary': '#f59e0b', '--primary-hover': '#fbbf24', '--primary-light': 'rgba(245, 158, 11, 0.15)', '--input-bg': '#6b2a07', '--table-header': '#692a08', '--hover': '#6b2b07',
+      '--success': '#a3e635', '--success-bg': 'rgba(163, 230, 53, 0.15)', '--warning': '#fdba74', '--warning-bg': 'rgba(253, 186, 116, 0.15)', '--cross': '#fde047', '--cross-bg': 'rgba(253, 224, 71, 0.18)'
+    },
+    rose: {
+      '--bg': '#40031c', '--bg-soft': '#500724', '--card': '#650b30', '--text': '#ffe4e6', '--muted': '#fda4af', '--border': '#be123c',
+      '--primary': '#f43f5e', '--primary-hover': '#fb7185', '--primary-light': 'rgba(244, 63, 94, 0.15)', '--input-bg': '#780c39', '--table-header': '#760d38', '--hover': '#780c38',
+      '--success': '#6ee7b7', '--success-bg': 'rgba(110, 231, 183, 0.15)', '--warning': '#fde047', '--warning-bg': 'rgba(253, 224, 71, 0.15)', '--cross': '#f472b6', '--cross-bg': 'rgba(244, 114, 182, 0.2)'
+    },
+    slate: {
+      '--bg': '#0f172a', '--bg-soft': '#1e293b', '--card': '#1e293b', '--text': '#f8fafc', '--muted': '#94a3b8', '--border': '#334155',
+      '--primary': '#38bdf8', '--primary-hover': '#7dd3fc', '--primary-light': 'rgba(56, 189, 248, 0.12)', '--input-bg': '#334155', '--table-header': '#263347', '--hover': '#293548',
+      '--success': '#34d399', '--success-bg': 'rgba(52, 211, 153, 0.15)', '--warning': '#fbbf24', '--warning-bg': 'rgba(251, 191, 36, 0.15)', '--cross': '#a78bfa', '--cross-bg': 'rgba(167, 139, 250, 0.15)'
+    },
+  };
+
+  const ThemeEngine = {
+    activeTheme: 'light',
+    applyTheme(name) {
+      // Guard against invalid names from a stale/corrupted localStorage entry
+      this.activeTheme = THEMES[name] ? name : 'light';
+      const vars = THEMES[this.activeTheme];
+      const root = document.documentElement.style;
+      // Push each variable onto <html>; every themed element updates instantly
+      Object.entries(vars).forEach(([k, v]) => root.setProperty(k, v));
+      // Keep the dropdown in sync (important on first load from storage)
+      const selector = document.getElementById('themeSelector');
+      if (selector) selector.value = this.activeTheme;
+      localStorage.setItem('dqb_pro_theme', this.activeTheme); // persist across sessions
+    },
+    init() {
+      // Default is 'midnight' for first-time visitors
+      this.applyTheme(localStorage.getItem('dqb_pro_theme') || 'midnight');
+    }
+  };
+
+  // Apply theme IMMEDIATELY (before DOMContentLoaded) to prevent a flash
+  // of unthemed content on page load.
+  ThemeEngine.init();
+
+  /* ===========================================================================
+     2. MAIN APPLICATION CONTROLLER
+     IIFE (Immediately Invoked Function Expression) module pattern:
+     - `state`, engines, and Components are PRIVATE (closure-scoped)
+     - Only { Helpers, Navigation, Render, Init } are exposed publicly,
+       which is why inline HTML handlers can call App.Navigation.closeSidebar()
+     =========================================================================== */
+  const App = (function() {
+    'use strict';
+
+    // ---- Constants -----------------------------------------------------------
+    const STORAGE_KEY = 'dqb_pro_settings_v7'; // versioned key: bump to invalidate old schemas
+    const ROWS_PER_PAGE = 50;                  // pagination size — keeps the table DOM light
+
+    // Columns that must NEVER be treated as quota/answer columns during
+    // auto-detection (respondent IDs, timestamps, the output column, etc.)
+    const METADATA_COLUMNS = new Set([
+      'uuid', 'id', 'rid', 'respid', 'respondent', 'record',
+      'markers', 'status', 'duration', 'date'
+    ]);
+
+    // One-click rule templates for the most common survey demographics.
+    // Each preset is spread into a new rule object when clicked.
+    const QUICK_PRESETS = [
+      { label: "Gender",  rule: { mode: "prefix", colPrefix: "s2",          markerPrefix: "/GenderQuota/",  manualText: "" } },
+      { label: "Age",     rule: { mode: "prefix", colPrefix: "s3",          markerPrefix: "/AgeQuota/",     manualText: "" } },
+      { label: "Region",  rule: { mode: "prefix", colPrefix: "s4",          markerPrefix: "/RegionQuota/",  manualText: "" } },
+      { label: "Country", rule: { mode: "prefix", colPrefix: "hid_country", markerPrefix: "/CountryQuota/", manualText: "" } }
+    ];
+
+    // ---- Central application state (single source of truth) -------------------
+    // Every UI change mutates this object then calls App.Render() to redraw.
+    let state = {
+      fileName: '',            // name of the loaded file (shown in sidebar)
+      workbook: null,          // raw SheetJS workbook object
+      sheets: [],              // pre-parsed sheets: [{ name, headers, rows }]
+      activeSheet: '',         // currently selected sheet name
+      rules: [],               // quota rules array (persisted)
+      markersCol: 'markers',   // output column name (persisted)
+      crossEnabled: false,     // crossed-quota feature toggle (persisted)
+      crossCol: 'hid_country', // column used as the cross variable (persisted)
+      crossFmt: '{col}r{val}', // template for the cross segment (persisted)
+      crossMode: 'crossed_only', // crossed_only | both | flat_only (persisted)
+      staticMarkers: '',       // markers appended to EVERY row (persisted)
+      processedRows: null,     // output dataset (null = not yet processed)
+      builtMap: {},            // last column→marker map used during processing
+      tab: 'preview',          // active workspace tab
+      search: '',              // preview table search query
+      rowFilter: 'all',        // preview filter: all | zero | crossed
+      currentPage: 1,          // pagination cursor
+      expandedRuleId: null,    // which rule's "matched columns" inspector is open
+      error: '',               // banner error message
+      sidebarOpen: false       // mobile drawer open flag
+    };
+
+    // Short pseudo-unique ID for rules (UI keys only — not collision-proof;
+    // crypto.randomUUID() would be a stronger choice).
+    const generateUID = () => Math.random().toString(36).substring(2, 9);
+
+    // Default rule shown to first-time users, demonstrating both grid syntax
+    // (B6r1, B6r2) and the manual mapping format.
+    const createDefaultRule = () => ({
+      id: generateUID(), enabled: true, mode: 'prefix', colPrefix: 'B6', markerPrefix: '/B6Quota/',
+      manualText: 'B6r1=/B6Quota/B6r1\nB6r2=/B6Quota/B6r2'
+    });
+
+    /* -------------------------------------------------------------------------
+       STORAGE ENGINE — persists CONFIGURATION only (rules & settings).
+       Dataset rows are intentionally NOT persisted: they can be huge and
+       may contain sensitive respondent data.
+       ------------------------------------------------------------------------- */
+    const StorageEngine = {
+      load() {
+        try {
+          const raw = localStorage.getItem(STORAGE_KEY);
+          if (!raw) { state.rules = [createDefaultRule()]; return; }
+          const saved = JSON.parse(raw);
+          // Every field falls back to a safe default → resilient to schema drift
+          state.rules = Array.isArray(saved.rules) && saved.rules.length ? saved.rules : [createDefaultRule()];
+          state.markersCol = saved.markersCol || 'markers'; state.crossEnabled = !!saved.crossEnabled;
+          state.crossCol = saved.crossCol || 'hid_country'; state.crossFmt = saved.crossFmt || '{col}r{val}';
+          state.crossMode = saved.crossMode || 'crossed_only'; state.staticMarkers = saved.staticMarkers || '';
+        } catch (e) {
+          // Corrupted JSON in storage → recover with a fresh default rule
+          state.rules = [createDefaultRule()];
+        }
+      },
+      save() {
+        try {
+          localStorage.setItem(STORAGE_KEY, JSON.stringify({
+            rules: state.rules, markersCol: state.markersCol, crossEnabled: state.crossEnabled,
+            crossCol: state.crossCol, crossFmt: state.crossFmt, crossMode: state.crossMode, staticMarkers: state.staticMarkers
+          }));
+        } catch (e){ /* quota exceeded / private mode — non-fatal, ignore */ }
+      }
+    };
+
+    /* -------------------------------------------------------------------------
+       TOAST NOTIFICATIONS — self-removing after 3s.
+       ⚠️ Uses innerHTML for the message: only ever pass trusted strings, or
+       escape user-derived content (e.g. file names) before calling.
+       ------------------------------------------------------------------------- */
+    const Toast = {
+      show(message, type = 'info') {
+        const container = document.getElementById('toastContainer');
+        if (!container) return;
+        const toast = document.createElement('div');
+        const bgColors = {
+          err: 'bg-red-600 text-white', success: 'bg-emerald-600 text-white', info: 'bg-theme-card text-theme-text border border-theme-border shadow-lg'
+        };
+        toast.className = `toast-item pointer-events-auto flex items-center justify-between rounded-xl px-3.5 py-2.5 shadow-xl text-xs font-semibold ${bgColors[type] || bgColors.info}`;
+        toast.innerHTML = `<span>${message}</span>`;
+        container.appendChild(toast);
+        // Fade out after 3s, then remove from DOM after the 200ms transition
+        setTimeout(() => { toast.style.opacity = '0'; toast.style.transform = 'translateY(10px)'; toast.style.transition = 'all 0.2s ease'; setTimeout(() => toast.remove(), 200); }, 3000);
+      }
+    };
+
+    /* -------------------------------------------------------------------------
+       DETECTION ENGINE — the "smart" part of the app.
+       Finds Decipher-style column groups (Q1r1, Q1r2, B6r1…) automatically.
+       ------------------------------------------------------------------------- */
+    const DetectionEngine = {
+      /**
+       * Groups headers by their common prefix.
+       * Regex breakdown:
+       *   ^([a-zA-Z]+[0-9]*[a-zA-Z]*?)  → captures the base name ("Q1", "B6", "hid")
+       *   (?:[rR_]\d+|$)               → followed by a row suffix like r1 / R2 / _3,
+       *                                   OR end-of-string (standalone columns)
+       * So "Q1r1", "Q1r2", "Q1r3" all collapse into prefix "Q1" with count 3.
+       */
+      detectGroups(headers) {
+        const prefixCounts = new Map();
+        for (const header of headers) {
+          if (!header || METADATA_COLUMNS.has(String(header).toLowerCase())) continue; // skip ID/meta cols
+          const match = String(header).match(/^([a-zA-Z]+[0-9]*[a-zA-Z]*?)(?:[rR_]\d+|$)/);
+          if (match && match[1] && match[1].length >= 1 && match[1].toLowerCase() !== 'markers') {
+            const prefix = match[1]; prefixCounts.set(prefix, (prefixCounts.get(prefix) || 0) + 1);
+          }
+        }
+        // Sort by frequency — most likely grid questions surface first
+        return [...prefixCounts.entries()].filter(([, count]) => count >= 1).map(([prefix, count]) => ({ prefix, count })).sort((a, b) => b.count - a.count);
+      },
+
+      /**
+       * Creates rules for detected groups.
+       * @param isManualClick — true when triggered by the "⚡ Auto-Detect All"
+       *   button (shows feedback toasts even when nothing new is found);
+       *   false when auto-run on file load (silent unless something happens).
+       */
+      autoApplyRules(headers, isManualClick = false) {
+        const detected = this.detectGroups(headers);
+        if (detected.length === 0) { if (isManualClick) Toast.show('No structured Decipher grids detected', 'err'); return; }
+        // Skip prefixes already configured; require 2+ columns (real grids only)
+        const existingPrefixes = new Set(state.rules.map(r => r.colPrefix.toLowerCase()));
+        const newDetected = detected.filter(d => !existingPrefixes.has(d.prefix.toLowerCase()) && d.count >= 2);
+
+        if (newDetected.length > 0) {
+          // If the sole existing rule matches ZERO columns in this dataset,
+          // it's just the stale default — discard it for a clean slate.
+          const currentSheet = App.Helpers.getCurrentSheet();
+          const currentMapSize = currentSheet ? Object.keys(ProcessingEngine.buildMergedMap(currentSheet)).length : 0;
+          if (currentMapSize === 0 && state.rules.length === 1) state.rules = [];
+
+          // Cap at 10 auto-rules to avoid flooding the UI with noise prefixes
+          newDetected.slice(0, 10).forEach(d => {
+            state.rules.push({ id: generateUID(), enabled: true, mode: 'prefix', colPrefix: d.prefix, markerPrefix: `/${d.prefix}Quota/`, manualText: '' });
+          });
+
+          state.processedRows = null; // config changed → old output is stale
+          StorageEngine.save();
+          if (isManualClick || newDetected.length > 0) Toast.show(`✨ Auto-created rules for ${newDetected.length} detected column groups!`, 'success');
+        } else if (isManualClick) {
+          Toast.show('All detected groups are already configured', 'info');
+        }
+      }
+    };
+
+    /* -------------------------------------------------------------------------
+       PROCESSING ENGINE — file parsing, marker mapping, and dataset generation.
+       ------------------------------------------------------------------------- */
+    const ProcessingEngine = {
+      parseFile(file) {
+        // Reset any previous session's output before loading a new file
+        state.error = ''; state.processedRows = null; state.builtMap = {};
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          try {
+            const data = new Uint8Array(e.target.result);
+            const wb = XLSX.read(data, { type: 'array' }); // SheetJS parses xlsx/xls/csv uniformly
+            state.workbook = wb;
+            // Pre-parse ALL sheets up-front.
+            // Trade-off: instant sheet switching vs. holding the whole file in memory.
+            state.sheets = wb.SheetNames.map(name => {
+              const ws = wb.Sheets[name];
+              // defval:'' guarantees EVERY row has EVERY key, even for blank cells
+              const rows = XLSX.utils.sheet_to_json(ws, { defval: '' });
+              // Sheet with headers but zero data rows → read the raw header row instead
+              const headers = rows.length ? Object.keys(rows[0]) : (XLSX.utils.sheet_to_json(ws, { header: 1 })[0] || []);
+              return { name, headers, rows };
+            });
+
+            state.activeSheet = state.sheets[0]?.name || ''; state.fileName = file.name; state.currentPage = 1;
+
+            // Smart-guess a cross variable if the saved one doesn't exist here:
+            // prefer demographic-looking column names, else fall back to column 0
+            const activeSheet = state.sheets[0];
+            if (activeSheet && !activeSheet.headers.includes(state.crossCol)) {
+              const possibleCross = activeSheet.headers.find(h => /^(hid_country|country|hid_age|age|gender|d_)/i.test(h));
+              if (possibleCross) state.crossCol = possibleCross; else if (activeSheet.headers[0]) state.crossCol = activeSheet.headers[0];
+            }
+
+            // Silent auto-detection pass on load (isManualClick = false)
+            if (activeSheet) DetectionEngine.autoApplyRules(activeSheet.headers, false);
+            Toast.show(`Loaded "${file.name}" (${activeSheet ? activeSheet.rows.length : 0} rows)`, 'success');
+            App.Render();
+          } catch (err) {
+            state.error = `File parsing failed: ${err.message}`; Toast.show(state.error, 'err'); App.Render();
+          }
+        };
+        reader.readAsArrayBuffer(file); // ArrayBuffer required by XLSX.read(type:'array')
+      },
+
+      /**
+       * Converts ONE rule into a { columnName: markerPath } lookup table.
+       * - manual mode: parses "col=marker" lines. Uses indexOf('=') (not split)
+       *   deliberately, so marker VALUES may themselves contain '=' characters.
+       * - prefix mode: any header startsWith(prefix) gets mapped.
+       *   ⚠️ Known trap: prefix "Q1" also matches "Q10r1" — the per-rule
+       *   inspector ("N cols" badge) exists so users can catch over-matches.
+       */
+      buildRuleMap(rule, headers) {
+        const map = {};
+        if (!rule.enabled) return map; // disabled rules contribute nothing
+        if (rule.mode === 'manual') {
+          const lines = (rule.manualText || '').split(/\r?\n/); // handle Windows + Unix line endings
+          for (const line of lines) {
+            const eqIndex = line.indexOf('='); if (eqIndex <= 0) continue; // skip blank/invalid lines
+            const key = line.substring(0, eqIndex).trim(); const val = line.substring(eqIndex + 1).trim();
+            if (key) map[key] = val;
+          }
+        } else if (rule.colPrefix) {
+          for (const header of headers) if (header.startsWith(rule.colPrefix)) map[header] = rule.markerPrefix + header;
+        }
+        return map;
+      },
+
+      // Merges all rule maps. Object.assign order = rule list order, so on a
+      // column collision the LAST rule in the list wins (precedence contract).
+      buildMergedMap(sheet) {
+        const merged = {};
+        for (const rule of state.rules) Object.assign(merged, this.buildRuleMap(rule, sheet.headers));
+        return merged;
+      },
+
+      /**
+       * Builds the crossing segment, e.g. "hid_countryr3".
+       * Returns null (= skip crossing for this row) for empty / "0" / NaN-ish
+       * values, since 0/blank typically means "not asked / N.A." in survey data.
+       */
+      formatCrossSegment(colName, rawValue) {
+        if (rawValue === null || rawValue === undefined) return null;
+        const stringVal = String(rawValue).trim();
+        if (stringVal === '' || stringVal === '0' || /^nan$/i.test(stringVal)) return null;
+        return state.crossFmt.replace(/\{col\}/g, colName).replace(/\{val\}/g, stringVal);
+      },
+
+      /**
+       * Inserts the cross segment as the SECOND path element:
+       *   /B6Quota/B6r1 + "countryr3"  →  /B6Quota/countryr3/B6r1
+       * Keeping the quota root first preserves Decipher's quota-sheet grouping.
+       * Edge cases:
+       *   - base has no second "/" → append segment to the end
+       *   - base is not an absolute path → prepend the segment instead
+       */
+      injectCrossSegment(basePath, segment) {
+        if (basePath.startsWith('/')) {
+          const secondSlashIndex = basePath.indexOf('/', 1);
+          if (secondSlashIndex === -1) return `${basePath.replace(/\/+$/, '')}/${segment}`;
+          return `${basePath.substring(0, secondSlashIndex)}/${segment}${basePath.substring(secondSlashIndex)}`;
+        }
+        return `${segment}/${basePath}`;
+      },
+
+      /**
+       * MAIN PROCESSING PIPELINE — transforms the raw dataset into output rows
+       * with the generated markers column. Runs on "▶ Process Markers".
+       */
+      processDataset() {
+        const sheet = App.Helpers.getCurrentSheet();
+        if (!sheet) { state.error = 'Please upload a dataset first.'; App.Render(); return; }
+        const baseMap = this.buildMergedMap(sheet);
+        const mappedColumns = Object.keys(baseMap);
+
+        // Guard 1: rules exist but nothing matched this dataset
+        if (mappedColumns.length === 0) {
+          state.error = 'No mapped columns matched. Click "Auto-Detect All" or verify rule prefixes.';
+          Toast.show('No mapped columns found', 'err'); App.Render(); return;
+        }
+
+        // Guard 2: crossing enabled but the cross column doesn't exist here
+        if (state.crossEnabled && !sheet.headers.includes(state.crossCol)) {
+          state.error = `Cross column "${state.crossCol}" was not found in this dataset.`;
+          Toast.show(state.error, 'err'); App.Render(); return;
+        }
+
+        state.error = '';
+        const outputCol = state.markersCol.trim() || 'markers';
+        // Static markers accept comma / semicolon / newline separators
+        const staticMarkers = (state.staticMarkers || '').split(/[,;\n]/).map(s => s.trim()).filter(Boolean);
+
+        state.processedRows = sheet.rows.map(row => {
+          // Preserve markers already present in the output column —
+          // the tool APPENDS, it never destroys existing data
+          const existingMarkers = (row[outputCol] !== undefined && row[outputCol] !== null && row[outputCol] !== '')
+            ? String(row[outputCol]).split(',').map(x => x.trim()).filter(Boolean) : [];
+          // Set() gives free deduplication across existing + static + generated
+          const markerSet = new Set(existingMarkers);
+          for (const staticMark of staticMarkers) markerSet.add(staticMark);
+          const crossSegment = state.crossEnabled ? this.formatCrossSegment(state.crossCol, row[state.crossCol]) : null;
+
+          for (const col of mappedColumns) {
+            const val = row[col];
+            // Loose equality (==) is INTENTIONAL: matches number 1, string "1",
+            // plus "true"/"1.0" variants that Excel/CSV exports commonly produce
+            const isHit = val == 1 || String(val).trim().toLowerCase() === 'true' || String(val).trim() === '1.0';
+            if (isHit) {
+              const baseMarker = baseMap[col]; if (!baseMarker) continue;
+              // Three output strategies:
+              //   flat_only    → base marker only
+              //   crossed_only → crossed marker only (falls back to flat when
+              //                  the row has no cross value → nobody dropped)
+              //   both         → emit both variants
+              const includeFlat = !state.crossEnabled || state.crossMode === 'flat_only' || state.crossMode === 'both';
+              const includeCross = state.crossEnabled && crossSegment && (state.crossMode === 'crossed_only' || state.crossMode === 'both');
+              if (includeFlat) markerSet.add(baseMarker);
+              if (includeCross) markerSet.add(this.injectCrossSegment(baseMarker, crossSegment));
+              // Fallback path: crossed-only mode + missing cross value → keep flat
+              if (state.crossEnabled && !crossSegment && state.crossMode === 'crossed_only') markerSet.add(baseMarker);
+            }
+          }
+          // Immutable update: original sheet.rows untouched, so the user can
+          // re-process with different settings without reloading the file
+          return { ...row, [outputCol]: Array.from(markerSet).join(',') };
+        });
+
+        state.builtMap = baseMap; state.tab = 'preview'; state.currentPage = 1;
+        Toast.show(`Successfully generated markers for ${state.processedRows.length} rows!`, 'success');
+        App.Render();
+      }
+    };
+
+    /* -------------------------------------------------------------------------
+       EXPORTER — download processed output in three formats.
+       All exports are client-side (SheetJS writeFile / Blob URLs).
+       ------------------------------------------------------------------------- */
+    const Exporter = {
+      exportXLSX() {
+        if (!state.processedRows) return; // nothing processed yet
+        const ws = XLSX.utils.json_to_sheet(state.processedRows);
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, 'Processed Markers');
+        // replace(/\.[^/.]+$/, '') strips the original extension from the filename
+        XLSX.writeFile(wb, `decipher_markers_${state.fileName.replace(/\.[^/.]+$/, '')}.xlsx`);
+        Toast.show('Downloaded Excel File (.xlsx)', 'success');
+      },
+      exportCSV() {
+        if (!state.processedRows) return;
+        const ws = XLSX.utils.json_to_sheet(state.processedRows);
+        const csv = XLSX.utils.sheet_to_csv(ws);
+        // Blob + temporary object URL = standard client-side download pattern
+        const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url; link.download = `decipher_markers_${state.fileName.replace(/\.[^/.]+$/, '')}.csv`;
+        link.click(); URL.revokeObjectURL(url); // revoke immediately to free memory
+        Toast.show('Downloaded CSV File', 'success');
+      },
+      // Multi-sheet analytics workbook: marker frequency + (optional) cross counts
+      exportSummaryReport() {
+        if (!state.processedRows) return;
+        const counts = [...App.Helpers.getMarkerCounts().entries()].sort((a, b) => b[1] - a[1]).map(([marker, count]) => ({ marker, count }));
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(counts), 'Marker Distribution');
+        const crossDist = App.Helpers.getCrossDistribution();
+        if (state.crossEnabled && crossDist.length) XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(crossDist), 'Cross Variable Counts');
+        XLSX.writeFile(wb, `marker_summary_${state.fileName.replace(/\.[^/.]+$/, '')}.xlsx`);
+        Toast.show('Downloaded Summary Report', 'success');
+      }
+    };
+
+    /* -------------------------------------------------------------------------
+       h() — HYPERSCRIPT-STYLE DOM BUILDER (a tiny React.createElement clone).
+       Usage:  h('div', { class: 'x', onclick: fn }, child1, [childArray], 'text')
+       Attribute handling:
+         - 'class'          → className
+         - 'style'          → cssText string
+         - 'on*' + function → addEventListener (e.g. onclick, oninput)
+         - 'html'           → innerHTML (⚠️ trusted static strings ONLY)
+         - value === true   → boolean attribute (checked, disabled, selected)
+         - null/false       → attribute skipped
+       Children: .flat(2) flattens nested arrays produced by .map() calls;
+       strings/numbers become safe text nodes (auto-escaped by the browser).
+       ------------------------------------------------------------------------- */
+    const h = (tag, attrs = {}, ...children) => {
+      const el = document.createElement(tag);
+      for (const [key, value] of Object.entries(attrs || {})) {
+        if (key === 'class') el.className = value;
+        else if (key === 'style') el.style.cssText = value;
+        else if (key.startsWith('on') && typeof value === 'function') el.addEventListener(key.slice(2).toLowerCase(), value);
+        else if (key === 'html') el.innerHTML = value;
+        else if (value === true) el.setAttribute(key, '');
+        else if (value !== false && value != null) el.setAttribute(key, value);
+      }
+      for (const child of children.flat(2)) {
+        if (child == null || child === false) continue; // allows `condition ? node : null` patterns
+        el.appendChild(typeof child === 'string' || typeof child === 'number' ? document.createTextNode(child) : child);
+      }
+      return el;
+    };
+
+    /* -------------------------------------------------------------------------
+       COMPONENTS — pure render functions. Each reads `state` and returns DOM.
+       They are re-invoked from scratch on every App.Render() call.
+       ------------------------------------------------------------------------- */
+    const Components = {
+      // Shown when no workbook is loaded: a large clickable dropzone <label>
+      // wrapping a hidden <input type="file">.
+      renderUploadScreen() {
+        return h('div', { class: 'flex min-h-[68vh] items-center justify-center px-3' },
+          h('label', {
+            class: 'flex w-full max-w-xl cursor-pointer flex-col items-center rounded-2xl border-2 border-dashed border-theme-border bg-theme-card p-8 text-center shadow-sm hover:border-theme-primary hover:bg-theme-bg-soft transition-all sm:p-12 group'
+          },
+            h('input', { type: 'file', accept: '.xlsx,.xls,.csv', class: 'hidden', onchange: (e) => { const file = e.target.files?.[0]; if (file) ProcessingEngine.parseFile(file); } }),
+
+            // SVG inserted via the h() 'html' prop — static trusted markup only
+            h('div', {
+              class: 'mb-6 flex h-16 w-16 items-center justify-center rounded-2xl bg-theme-primary-light text-theme-primary border border-theme-primary/30 shadow-[0_0_20px_var(--primary-light)] transition-transform duration-300 group-hover:scale-110',
+              html: `<svg class="h-8 w-8 text-theme-primary" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M12 16.5V9.75m0 0l3 3m-3-3l-3 3M6.75 19.5a4.5 4.5 0 01-1.41-8.775 5.25 5.25 0 0110.233-2.33 3 3 0 013.758 3.848A3.748 3.748 0 0118 19.5H6.75z" />
+              </svg>`
+            }),
+
+            h('h2', { class: 'text-lg font-bold text-theme-text sm:text-xl' }, 'Load Survey Dataset'),
+            h('p', { class: 'mt-1.5 text-xs text-theme-muted sm:text-sm' }, 'Drop Excel (.xlsx, .xls) or CSV containing Q1r1, B6r1, Age_1, etc.'),
+
+            // Feature badges (informational only)
+            h('div', { class: 'mt-6 grid grid-cols-2 gap-2 text-left text-xs font-medium text-theme-text sm:grid-cols-4' },
+              h('div', { class: 'rounded-lg border border-theme-border bg-theme-bg-soft px-2.5 py-2 text-center' }, '✨ Auto Q1/B6 Detect'),
+              h('div', { class: 'rounded-lg border border-theme-border bg-theme-bg-soft px-2.5 py-2 text-center' }, '⚡ 1-Click Setup'),
+              h('div', { class: 'rounded-lg border border-theme-border bg-theme-bg-soft px-2.5 py-2 text-center' }, '⬌ Crossed Quotas'),
+              h('div', { class: 'rounded-lg border border-theme-border bg-theme-bg-soft px-2.5 py-2 text-center' }, '📋 Decipher XML')
+            )
+          )
+        );
+      },
+
+      // Header buttons are state-dependent:
+      //   no file       → nothing
+      //   file loaded   → "Process Markers" + "Reset"
+      //   processed     → also XLSX/CSV export buttons (responsive: on the
+      //                   smallest screens they collapse into a dropdown menu)
+      renderHeaderActions() {
+        const container = document.getElementById('headerActions');
+        container.innerHTML = '';
+        if (!state.workbook) return;
+
+        const processBtn = h('button', {
+          class: 'flex items-center gap-1.5 rounded-lg bg-theme-primary px-3.5 py-1.5 text-xs font-semibold text-white shadow-sm hover:bg-theme-primary-hover active:scale-[0.98] transition-all touch-target sm:text-sm focus:outline-none focus:ring-2 focus:ring-theme-primary',
+          onclick: () => ProcessingEngine.processDataset()
+        }, '▶ Process Markers');
+        container.appendChild(processBtn);
+
+        if (state.processedRows) {
+          // sm+ screens: dedicated XLSX button
+          container.appendChild(h('button', {
+            class: 'hidden sm:inline-flex items-center gap-1 rounded-lg bg-theme-success px-3 py-1.5 text-xs font-semibold text-white shadow-sm hover:opacity-90 active:scale-[0.98] transition-all touch-target sm:text-sm focus:outline-none',
+            onclick: () => Exporter.exportXLSX()
+          }, '⬇ XLSX'));
+
+          // xs+ screens: dedicated CSV button
+          container.appendChild(h('button', {
+            class: 'hidden xs:inline-flex items-center gap-1 rounded-lg border border-theme-border bg-theme-bg-soft px-3 py-1.5 text-xs font-semibold text-theme-text shadow-sm hover:bg-theme-border active:scale-[0.98] transition-all touch-target sm:text-sm focus:outline-none',
+            onclick: () => Exporter.exportCSV()
+          }, '⬇ CSV'));
+
+          // Tiny screens (< xs): single "Export" dropdown holding all 3 options.
+          // The click-outside close handler is attached with setTimeout(…, 0)
+          // so the SAME click that opened the menu doesn't immediately close it.
+          const dropdownWrap = h('div', { class: 'relative xs:hidden' });
+          const dlMainBtn = h('button', {
+            class: 'flex items-center gap-1 rounded-lg bg-theme-success px-3 py-1.5 text-xs font-semibold text-white shadow-sm hover:opacity-90 touch-target focus:outline-none',
+            onclick: (e) => {
+              const menu = e.currentTarget.nextElementSibling; menu.classList.toggle('hidden');
+              const closeMenu = (ev) => { if (!dropdownWrap.contains(ev.target)) { menu.classList.add('hidden'); document.removeEventListener('click', closeMenu); } };
+              setTimeout(() => document.addEventListener('click', closeMenu), 0);
+            }
+          }, '⬇ Export');
+          const dlMenu = h('div', { class: 'absolute right-0 top-full z-20 mt-1.5 hidden w-36 overflow-hidden rounded-xl border border-theme-border bg-theme-card py-1 shadow-xl' },
+            h('button', { class: 'block w-full px-3 py-2 text-left text-xs font-medium text-theme-text hover:bg-theme-bg-soft', onclick: () => { Exporter.exportXLSX(); dlMenu.classList.add('hidden'); } }, '⬇ Excel (.xlsx)'),
+            h('button', { class: 'block w-full px-3 py-2 text-left text-xs font-medium text-theme-text hover:bg-theme-bg-soft', onclick: () => { Exporter.exportCSV(); dlMenu.classList.add('hidden'); } }, '⬇ CSV File'),
+            h('button', { class: 'block w-full px-3 py-2 text-left text-xs font-medium text-theme-text hover:bg-theme-bg-soft', onclick: () => { Exporter.exportSummaryReport(); dlMenu.classList.add('hidden'); } }, '📊 Summary Report')
+          );
+          dropdownWrap.appendChild(dlMainBtn); dropdownWrap.appendChild(dlMenu); container.appendChild(dropdownWrap);
+        }
+
+        // Reset: destructive → guarded by a confirm() dialog
+        container.appendChild(h('button', {
+          class: 'rounded-lg border border-theme-border bg-theme-card px-2.5 py-1.5 text-xs font-medium text-theme-text hover:bg-theme-bg-soft active:scale-[0.98] transition-all touch-target focus:outline-none focus:ring-2 focus:ring-theme-primary',
+          onclick: () => {
+            if (confirm('Reset all rules and configurations?')) {
+              state.rules = [createDefaultRule()]; state.markersCol = 'markers'; state.crossEnabled = false; state.processedRows = null;
+              StorageEngine.save(); App.Render();
+            }
+          }, title: 'Reset configuration'
+        }, 'Reset'));
+      },
+
+      /**
+       * ONE QUOTA RULE CARD. Shows:
+       * - enable checkbox, title, live match-count badge (green = matched,
+       *   amber = zero matches → likely misconfigured)
+       * - expandable inspector listing the first 15 column→marker mappings
+       * - Prefix/Manual mode toggle + corresponding inputs
+       *
+       * IMPORTANT PATTERN — oninput vs onchange on the text fields:
+       *   oninput  → saves state only (a full App.Render() here would rebuild
+       *              the input and destroy the user's cursor/focus mid-typing)
+       *   onchange → fires on blur → safe to run the full re-render then
+       */
+      renderRuleCard(rule, idx) {
+        const sheet = App.Helpers.getCurrentSheet();
+        const ruleMap = sheet ? ProcessingEngine.buildRuleMap(rule, sheet.headers) : {};
+        const matchEntries = Object.entries(ruleMap);
+        const matchCount = matchEntries.length;
+        const isExpanded = state.expandedRuleId === rule.id;
+
+        return h('div', { class: `rounded-xl border p-2.5 transition-all text-xs ${rule.enabled ? 'border-theme-border bg-theme-card shadow-2xs' : 'border-theme-border/60 bg-theme-bg-soft/50 opacity-60'}` },
+          h('div', { class: 'mb-2 flex items-center gap-2' },
+            h('input', {
+              type: 'checkbox', class: 'h-4 w-4 rounded border-theme-border text-theme-primary focus:ring-theme-primary',
+              checked: !!rule.enabled, onchange: (e) => { rule.enabled = e.target.checked; StorageEngine.save(); App.Render(); }
+            }),
+            h('span', { class: 'font-bold text-theme-text' }, `Rule ${idx + 1}: ${rule.colPrefix || 'Custom'}`),
+            // Match-count badge doubles as the inspector toggle
+            h('button', {
+              class: `ml-auto flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold transition-all border ${matchCount > 0 ? 'bg-theme-success-bg text-theme-success border-theme-success/30' : 'bg-theme-warning-bg text-theme-warning border-theme-warning/30'}`,
+              onclick: () => { state.expandedRuleId = isExpanded ? null : rule.id; App.Render(); }, title: 'Toggle matched columns inspector'
+            }, `${matchCount} cols`, h('span', { class: 'text-[8px]' }, isExpanded ? '▲' : '▼')),
+            // Delete button — disabled when it's the last remaining rule
+            h('button', {
+              class: 'touch-target flex h-6 w-6 items-center justify-center rounded-md text-theme-muted hover:bg-red-500/20 hover:text-red-500 disabled:opacity-30 focus:outline-none',
+              disabled: state.rules.length <= 1, onclick: () => { if (state.rules.length <= 1) return; state.rules = state.rules.filter(r => r.id !== rule.id); state.processedRows = null; StorageEngine.save(); App.Render(); }
+            }, '✕')
+          ),
+
+          // Expandable inspector: first 15 mappings + "+N more" overflow label
+          isExpanded ? h('div', { class: 'mb-2 max-h-32 overflow-y-auto rounded-lg border border-theme-border bg-theme-bg-soft p-1.5 text-[10px] mono space-y-1' },
+            matchCount === 0 ? h('div', { class: 'text-theme-muted italic text-center py-1 font-sans' }, 'No headers matched.')
+              : matchEntries.slice(0, 15).map(([col, marker]) => h('div', { class: 'flex justify-between border-b border-theme-border/50 pb-0.5 last:border-none' },
+                  h('span', { class: 'font-semibold text-theme-text truncate max-w-[45%]' }, col),
+                  h('span', { class: 'text-theme-primary truncate max-w-[52%]' }, marker)
+                )),
+            matchCount > 15 ? h('div', { class: 'text-center text-theme-muted font-sans font-medium pt-0.5' }, `+ ${matchCount - 15} more`) : null
+          ) : null,
+
+          // Segmented control: Prefix Match vs Manual Map
+          h('div', { class: 'mb-2 flex rounded-lg bg-theme-bg-soft p-0.5' },
+            h('button', {
+              class: `flex-1 rounded-md py-1 text-[11px] font-semibold transition-all ${rule.mode === 'prefix' ? 'bg-theme-card text-theme-primary shadow-2xs' : 'text-theme-muted hover:text-theme-text'}`,
+              onclick: () => { rule.mode = 'prefix'; StorageEngine.save(); App.Render(); }
+            }, 'Prefix Match'),
+            h('button', {
+              class: `flex-1 rounded-md py-1 text-[11px] font-semibold transition-all ${rule.mode === 'manual' ? 'bg-theme-card text-theme-primary shadow-2xs' : 'text-theme-muted hover:text-theme-text'}`,
+              onclick: () => { rule.mode = 'manual'; StorageEngine.save(); App.Render(); }
+            }, 'Manual Map')
+          ),
+
+          // Mode-specific inputs (see oninput/onchange note above)
+          rule.mode === 'prefix' ? h('div', { class: 'grid grid-cols-2 gap-1.5' },
+            h('input', {
+              type: 'text', placeholder: 'Prefix (e.g. Q1)', value: rule.colPrefix,
+              class: 'w-full rounded-lg border border-theme-border bg-theme-input-bg px-2 py-1.5 mono text-[11px] text-theme-text focus:border-theme-primary outline-none',
+              oninput: (e) => { rule.colPrefix = e.target.value; StorageEngine.save(); Components.renderHeaderActions(); }, onchange: () => App.Render()
+            }),
+            h('input', {
+              type: 'text', placeholder: 'Marker (/Q1Quota/)', value: rule.markerPrefix,
+              class: 'w-full rounded-lg border border-theme-border bg-theme-input-bg px-2 py-1.5 mono text-[11px] text-theme-text focus:border-theme-primary outline-none',
+              oninput: (e) => { rule.markerPrefix = e.target.value; StorageEngine.save(); Components.renderHeaderActions(); }, onchange: () => App.Render()
+            })
+          ) : h('textarea', {
+            class: 'h-20 w-full resize-y rounded-lg border border-theme-border bg-theme-input-bg px-2 py-1.5 mono text-[11px] text-theme-text focus:border-theme-primary outline-none',
+            placeholder: 'Q1r1=/Q1Quota/Q1r1\nQ1r2=/Q1Quota/Q1r2',
+            oninput: (e) => { rule.manualText = e.target.value; StorageEngine.save(); Components.renderHeaderActions(); }, onchange: () => App.Render()
+          }, rule.manualText || '')
+        );
+      },
+
+      /**
+       * FULL SIDEBAR. Rendered into TWO slots from this single function:
+       *   1. desktop sticky column (lg+ screens)
+       *   2. #mobileSidebarContent inside the drawer
+       * Sections: file info → quota rules → crossed quotas → static markers
+       *           → output column name.
+       */
+      renderSidebar(sheet) {
+        return h('aside', { class: 'space-y-3.5' },
+          // --- File info card + sheet switcher ---
+          h('div', { class: 'rounded-xl border border-theme-border bg-theme-card p-3 shadow-2xs' },
+            h('div', { class: 'mb-2 flex items-center justify-between gap-2' },
+              h('span', { class: 'min-w-0 truncate text-xs font-bold text-theme-text', title: state.fileName }, `📄 ${state.fileName}`),
+              // "Change File" resets file-related state → back to upload screen
+              h('button', {
+                class: 'shrink-0 rounded-md bg-theme-bg-soft px-2 py-0.5 text-[11px] font-medium text-theme-text hover:bg-theme-border transition-all focus:outline-none',
+                onclick: () => { state.workbook = null; state.sheets = []; state.activeSheet = ''; state.fileName = ''; state.processedRows = null; state.builtMap = {}; App.Navigation.closeSidebar(); App.Render(); }
+              }, 'Change File')
+            ),
+            h('div', { class: 'flex flex-wrap items-center gap-2 text-xs text-theme-muted font-medium' },
+              h('select', {
+                class: 'rounded-lg border border-theme-border bg-theme-input-bg px-2 py-1 text-xs font-semibold text-theme-text outline-none focus:ring-2 focus:ring-theme-primary',
+                // Switching sheets invalidates processed output (different data)
+                onchange: (e) => { state.activeSheet = e.target.value; state.processedRows = null; App.Render(); }
+              }, state.sheets.map(s => h('option', { value: s.name, selected: s.name === state.activeSheet }, s.name))),
+              h('span', {}, `${sheet.rows.length} rows · ${sheet.headers.length} cols`)
+            )
+          ),
+
+          // --- Quota Rules card ---
+          h('div', { class: 'rounded-xl border border-theme-border bg-theme-card p-3 shadow-2xs' },
+            h('div', { class: 'mb-2 flex items-center justify-between' },
+              h('h3', { class: 'text-[11px] font-bold uppercase tracking-wider text-theme-muted' }, 'Quota Rules'),
+              h('div', { class: 'flex items-center gap-1.5' },
+                h('button', {
+                  class: 'rounded-lg bg-theme-success-bg border border-theme-success/30 px-2 py-1 text-[11px] font-bold text-theme-success hover:opacity-80 transition-all focus:outline-none',
+                  onclick: () => { DetectionEngine.autoApplyRules(sheet.headers, true); App.Render(); } // manual click → verbose toasts
+                }, '⚡ Auto-Detect All'),
+                h('button', {
+                  class: 'rounded-lg bg-theme-primary-light px-2.5 py-1 text-xs font-bold text-theme-primary hover:opacity-80 transition-all focus:outline-none border border-theme-primary/20',
+                  onclick: () => { state.rules.push({ ...createDefaultRule(), id: generateUID(), colPrefix: '', markerPrefix: '/Quota/' }); state.processedRows = null; StorageEngine.save(); App.Render(); }
+                }, '+ Rule')
+              )
+            ),
+
+            // "Detected in sheet" suggestion chips — an IIFE computes the list
+            // inline: detected prefixes MINUS ones already configured.
+            // Clicking a chip creates a pre-filled rule instantly.
+            (() => {
+              const detected = DetectionEngine.detectGroups(sheet.headers);
+              const configured = new Set(state.rules.map(r => r.colPrefix.toLowerCase()));
+              const available = detected.filter(d => !configured.has(d.prefix.toLowerCase()));
+              if (available.length === 0) return null; // hide the whole block when nothing to suggest
+              return h('div', { class: 'mb-2.5 p-2 rounded-lg bg-theme-primary-light border border-theme-primary/20 space-y-1.5' },
+                h('div', { class: 'text-[10px] font-bold uppercase text-theme-primary flex items-center gap-1' }, '✨ Detected in sheet:'),
+                h('div', { class: 'flex flex-wrap gap-1' },
+                  available.slice(0, 8).map(d => h('button', {
+                    class: 'rounded-md bg-theme-card border border-theme-border px-2 py-0.5 text-[11px] font-semibold text-theme-text hover:bg-theme-primary hover:text-white transition-all shadow-2xs focus:outline-none',
+                    onclick: () => {
+                      state.rules.push({ id: generateUID(), enabled: true, mode: 'prefix', colPrefix: d.prefix, markerPrefix: `/${d.prefix}Quota/`, manualText: '' });
+                      state.processedRows = null; StorageEngine.save(); App.Render();
+                    }
+                  }, `+ ${d.prefix} (${d.count})`))
+                )
+              );
+            })(),
+
+            // Quick preset chips (Gender / Age / Region / Country)
+            h('div', { class: 'mb-2.5 flex flex-wrap gap-1' },
+              QUICK_PRESETS.map(p => h('button', {
+                class: 'rounded-md border border-theme-border bg-theme-bg-soft px-2 py-0.5 text-[10px] font-medium text-theme-text hover:border-theme-primary hover:text-theme-primary transition-all focus:outline-none',
+                onclick: () => { state.rules.push({ id: generateUID(), enabled: true, manualText: '', ...p.rule }); state.processedRows = null; StorageEngine.save(); App.Render(); }
+              }, `+ ${p.label}`))
+            ),
+            // The rule card list itself
+            h('div', { class: 'space-y-2' }, state.rules.map((r, idx) => this.renderRuleCard(r, idx)))
+          ),
+
+          // --- Crossed Quotas card (purple-tinted while enabled) ---
+          h('div', { class: `rounded-xl border p-3 shadow-2xs transition-all ${state.crossEnabled ? 'border-theme-cross/60 bg-theme-cross-bg' : 'border-theme-border bg-theme-card'}` },
+            h('label', { class: 'flex cursor-pointer items-center justify-between' },
+              h('span', { class: 'text-[11px] font-bold uppercase tracking-wider text-theme-muted' }, '⬌ Crossed Quotas'),
+              h('input', {
+                type: 'checkbox', class: 'h-4 w-4 rounded border-theme-border text-theme-primary focus:ring-theme-primary',
+                checked: !!state.crossEnabled, onchange: (e) => { state.crossEnabled = e.target.checked; StorageEngine.save(); App.Render(); }
+              })
+            ),
+            // Detailed controls render only while enabled
+            state.crossEnabled ? h('div', { class: 'mt-2.5 space-y-2.5 text-xs border-t border-theme-border pt-2.5' },
+              h('div', {},
+                h('label', { class: 'mb-1 block text-[11px] font-semibold text-theme-text' }, 'Cross Variable Column'),
+                h('select', {
+                  class: 'w-full rounded-lg border border-theme-border bg-theme-input-bg px-2.5 py-1.5 mono text-[11px] font-medium text-theme-text outline-none focus:border-theme-primary',
+                  onchange: (e) => { state.crossCol = e.target.value; StorageEngine.save(); App.Render(); }
+                }, sheet.headers.map(hdr => h('option', { value: hdr, selected: hdr === state.crossCol }, hdr))),
+
+                // Value distribution chips (first 6) — instant sanity check that
+                // the chosen column actually contains sensible cross values
+                (() => {
+                  const crossDist = App.Helpers.getCrossDistribution();
+                  if (crossDist.length === 0) return null;
+                  return h('div', { class: 'mt-1.5 flex flex-wrap gap-1' },
+                    crossDist.slice(0, 6).map(d => h('span', { class: 'rounded bg-theme-card border border-theme-border px-1.5 py-0.5 mono text-[10px] font-semibold text-theme-cross', title: `${d.count} respondents` }, `${d.value} (${d.count})`)),
+                    crossDist.length > 6 ? h('span', { class: 'text-[10px] text-theme-muted self-center' }, `+${crossDist.length - 6} more`) : null
+                  );
+                })()
+              ),
+
+              // Output mode selector (see processDataset() for the semantics)
+              h('div', {},
+                h('label', { class: 'mb-1 block text-[11px] font-semibold text-theme-text' }, 'Output Mode'),
+                h('select', {
+                  class: 'w-full rounded-lg border border-theme-border bg-theme-input-bg px-2.5 py-1.5 text-[11px] font-medium text-theme-text outline-none focus:border-theme-primary',
+                  onchange: (e) => { state.crossMode = e.target.value; StorageEngine.save(); App.Render(); }
+                }, [ ['crossed_only', 'Crossed segment only'], ['both', 'Both crossed + flat markers'], ['flat_only', 'Flat marker only'] ].map(([v, l]) => h('option', { value: v, selected: v === state.crossMode }, l)))
+              ),
+
+              // Segment pattern with {col}/{val} placeholders + reset-to-default
+              h('div', {},
+                h('label', { class: 'mb-1 block text-[11px] font-semibold text-theme-text' }, 'Path Segment Pattern'),
+                h('div', { class: 'flex gap-1.5' },
+                  h('input', {
+                    type: 'text', value: state.crossFmt,
+                    class: 'flex-1 rounded-lg border border-theme-border bg-theme-input-bg px-2.5 py-1.5 mono text-[11px] text-theme-text outline-none focus:border-theme-primary',
+                    onchange: (e) => { state.crossFmt = e.target.value; StorageEngine.save(); App.Render(); }
+                  }),
+                  h('button', {
+                    class: 'rounded-lg bg-theme-bg-soft px-2.5 py-1 text-[11px] font-semibold text-theme-text hover:bg-theme-border focus:outline-none',
+                    onclick: () => { state.crossFmt = '{col}r{val}'; StorageEngine.save(); App.Render(); }
+                  }, 'Default')
+                ),
+                h('div', { class: 'mt-1 text-[10px] text-theme-muted' }, 'Variables: {col} and {val}')
+              ),
+
+              // Live preview: takes the FIRST mapped column and shows what its
+              // flat vs crossed marker would look like assuming cross value = 1.
+              (() => {
+                const mp = ProcessingEngine.buildMergedMap(sheet);
+                const firstKey = Object.keys(mp)[0]; if (!firstKey) return null; // no mappings yet → no preview
+                const seg = state.crossFmt.replace(/\{col\}/g, state.crossCol).replace(/\{val\}/g, '1');
+                const crossed = ProcessingEngine.injectCrossSegment(mp[firstKey], seg);
+                return h('div', { class: 'rounded-lg border border-theme-border bg-theme-card p-2 text-xs mono' },
+                  h('div', { class: 'mb-1 text-[10px] font-sans font-bold uppercase tracking-wider text-theme-cross' }, 'Live Preview (if val=1)'),
+                  h('div', { class: 'break-all text-[11px]' }, h('span', { class: 'text-theme-muted' }, 'Flat: '), mp[firstKey]),
+                  h('div', { class: 'break-all text-[11px]' }, h('span', { class: 'text-theme-muted' }, 'Cross: '), h('span', { class: 'font-bold text-theme-text' }, crossed))
+                );
+              })()
+            ) : null
+          ),
+
+          // --- Static markers (appended to every respondent) ---
+          h('div', { class: 'rounded-xl border border-theme-border bg-theme-card p-3 shadow-2xs' },
+            h('label', { class: 'mb-1 block text-[11px] font-bold uppercase tracking-wider text-theme-muted' }, 'Static Markers (All Rows)'),
+            h('input', {
+              type: 'text', value: state.staticMarkers, placeholder: '/completes/, /qualified/',
+              class: 'w-full rounded-lg border border-theme-border bg-theme-input-bg px-2.5 py-1.5 mono text-[11px] text-theme-text outline-none focus:border-theme-primary',
+              oninput: (e) => { state.staticMarkers = e.target.value; StorageEngine.save(); } // save-only: no visual dependency
+            })
+          ),
+
+          // --- Output column name ---
+          h('div', { class: 'rounded-xl border border-theme-border bg-theme-card p-3 shadow-2xs' },
+            h('label', { class: 'mb-1 block text-[11px] font-bold uppercase tracking-wider text-theme-muted' }, 'Output Target Column'),
+            h('input', {
+              type: 'text', value: state.markersCol,
+              class: 'w-full rounded-lg border border-theme-border bg-theme-input-bg px-2.5 py-1.5 mono text-[11px] font-semibold text-theme-text outline-none focus:border-theme-primary',
+              oninput: (e) => { state.markersCol = e.target.value; StorageEngine.save(); }
+            })
+          )
+        );
+      },
+
+      // Workspace shell: tab bar (+ preview-only filters), error banner,
+      // and the active tab's panel.
+      renderMainWorkspace(sheet, map, counts) {
+        const issuesList = App.Helpers.getDiagnostics();
+        const outputCol = state.markersCol.trim() || 'markers';
+
+        return h('section', { class: 'space-y-3.5' },
+          h('div', { class: 'rounded-xl border border-theme-border bg-theme-card p-2 shadow-2xs' },
+            h('div', { class: 'flex flex-col gap-2.5 sm:flex-row sm:items-center sm:justify-between' },
+              // Tab labels embed live counts so the numbers are visible
+              // without opening the tab (e.g. "Diagnostics (2)")
+              h('div', { class: 'tabs-scroll flex gap-1 overflow-x-auto text-xs font-semibold' },
+                [
+                  ['preview', `Preview (${state.processedRows ? state.processedRows.length : sheet.rows.length})`],
+                  ['summary', `Summary & Export (${counts.size})`],
+                  ['issues', `Diagnostics${issuesList.length ? ` (${issuesList.length})` : ''}`]
+                ].map(([key, label]) => h('button', {
+                  class: `shrink-0 rounded-lg px-3 py-1.5 transition-all touch-target focus:outline-none ${state.tab === key ? 'bg-theme-primary text-white shadow-2xs' : 'text-theme-text hover:bg-theme-bg-soft'}`,
+                  onclick: () => { state.tab = key; App.Render(); }
+                }, label))
+              ),
+
+              // Search + row-filter controls only make sense on the Preview tab.
+              // The filter dropdown further requires processed output to exist.
+              state.tab === 'preview' ? h('div', { class: 'flex flex-wrap items-center gap-2' },
+                state.processedRows ? h('select', {
+                  class: 'rounded-lg border border-theme-border bg-theme-input-bg px-2 py-1.5 text-xs font-medium text-theme-text outline-none focus:border-theme-primary',
+                  onchange: (e) => { state.rowFilter = e.target.value; state.currentPage = 1; App.Render(); } // filter change → reset to page 1
+                }, [ ['all', 'All Rows'], ['zero', 'No Output Markers (0)'], ['crossed', 'Has Crossed Segments'] ].map(([val, lbl]) => h('option', { value: val, selected: state.rowFilter === val }, lbl))) : null,
+
+                h('input', {
+                  type: 'text', value: state.search, placeholder: 'Search dataset...',
+                  class: 'w-full min-w-0 rounded-lg border border-theme-border bg-theme-input-bg px-3 py-1.5 text-xs text-theme-text outline-none focus:border-theme-primary sm:w-48',
+                  oninput: (e) => { state.search = e.target.value; state.currentPage = 1; App.Render(); } // NOTE: undebounced live search
+                })
+              ) : null
+            )
+          ),
+
+          // Dismissible error banner
+          state.error ? h('div', { class: 'rounded-xl border border-red-500/50 bg-red-500/10 px-4 py-3 text-xs font-semibold text-red-500 flex items-center justify-between' },
+            h('span', {}, `⚠ ${state.error}`), h('button', { class: 'text-red-500 hover:text-red-400 focus:outline-none', onclick: () => { state.error = ''; App.Render(); } }, '✕')
+          ) : null,
+
+          // Tab router
+          (() => {
+            if (state.tab === 'preview') return this.renderPreviewPanel(sheet, map, outputCol);
+            if (state.tab === 'summary') return this.renderSummaryPanel(counts);
+            if (state.tab === 'issues') return this.renderDiagnosticsPanel(issuesList);
+            return null;
+          })()
+        );
+      },
+
+      /**
+       * PREVIEW TABLE. Pipeline per render:
+       *   choose columns → pick data source → filter → search → paginate → draw
+       */
+      renderPreviewPanel(sheet, map, outputCol) {
+        const mapKeys = Object.keys(map);
+        // Column selection strategy — show only what matters, in priority order:
+        //   cross col + ID columns → first 3 raw columns for context →
+        //   all mapped quota columns → output column. Set dedupes overlaps.
+        const priorityCols = [state.crossEnabled ? state.crossCol : null, 'uuid', 'id', 'rid', 'respid'].filter(Boolean);
+        const displayHeaders = [...new Set([...priorityCols.filter(p => sheet.headers.includes(p)), ...sheet.headers.slice(0, 3), ...mapKeys, outputCol])];
+
+        const query = state.search.trim().toLowerCase();
+        // Show processed output when available, otherwise the raw source rows
+        const sourceRows = state.processedRows || sheet.rows;
+
+        let filteredRows = sourceRows;
+        // 'zero' filter: rows whose output column ended up empty (QA use case)
+        if (state.rowFilter === 'zero' && state.processedRows) filteredRows = filteredRows.filter(r => !String(r[outputCol] || '').trim());
+        // 'crossed' filter — HEURISTIC: marker mentions the cross col name,
+        // or the marker string has >4 path segments (deep = probably crossed)
+        else if (state.rowFilter === 'crossed' && state.processedRows) filteredRows = filteredRows.filter(r => String(r[outputCol] || '').includes(state.crossCol) || String(r[outputCol] || '').split('/').length > 4);
+        // Text search across ALL cell values in the row
+        if (query) filteredRows = filteredRows.filter(r => Object.values(r).some(v => String(v).toLowerCase().includes(query)));
+
+        // Pagination — clamp currentPage in case filters shrank the row count
+        const totalPages = Math.ceil(filteredRows.length / ROWS_PER_PAGE) || 1;
+        state.currentPage = Math.max(1, Math.min(state.currentPage, totalPages));
+        const paginatedRows = filteredRows.slice((state.currentPage - 1) * ROWS_PER_PAGE, state.currentPage * ROWS_PER_PAGE);
+
+        return h('div', { class: 'space-y-2' },
+          h('div', { class: 'overflow-hidden rounded-xl border border-theme-border bg-theme-card shadow-2xs' },
+            h('div', { class: 'table-scroll-hint relative max-h-[calc(100vh-280px)] overflow-auto' },
+              h('table', { class: 'min-w-full divide-y divide-theme-border text-[11px]' },
+                // sticky header stays visible while scrolling rows
+                h('thead', { class: 'sticky top-0 z-10 bg-theme-table-header backdrop-blur-xs' },
+                  h('tr', {},
+                    // Header color coding: primary = output col, amber = mapped quota col
+                    displayHeaders.map(hdr => h('th', {
+                      class: `whitespace-nowrap px-2.5 py-2 text-left font-bold tracking-tight ${hdr === outputCol ? 'bg-theme-primary-light text-theme-primary' : mapKeys.includes(hdr) ? 'text-theme-warning' : 'text-theme-text'}`
+                    }, hdr)),
+                    state.processedRows ? h('th', { class: 'w-8 bg-theme-table-header' }) : null // copy-button column
+                  )
+                ),
+                h('tbody', { class: 'divide-y divide-theme-border/40' },
+                  paginatedRows.map(row => h('tr', { class: 'hover:bg-theme-hover transition-colors' },
+                    displayHeaders.map(hdr => {
+                      const val = row[hdr];
+                      const isMarkerCol = hdr === outputCol;
+                      const isMappedCol = mapKeys.includes(hdr);
+                      const isHit = isMappedCol && (val == 1 || String(val).trim().toLowerCase() === 'true'); // green highlight for "1" hits
+                      let displayStr = val == null ? '' : String(val);
+                      // Truncate long marker strings so rows stay readable
+                      if (isMarkerCol && displayStr.length > 75) displayStr = `${displayStr.substring(0, 75)}…`;
+
+                      return h('td', {
+                        class: `whitespace-nowrap px-2.5 py-1.5 ${isMarkerCol ? 'bg-theme-primary-light font-semibold text-theme-primary' : isHit ? 'bg-theme-success-bg font-bold text-theme-success' : isMappedCol ? 'mono text-theme-muted' : 'text-theme-text font-medium'}`
+                      }, displayStr);
+                    }),
+                    // Per-row copy button. IIFE captures a reference to the
+                    // button node so the onclick can mutate ITS OWN icon to
+                    // "✓" for 1 second as inline visual feedback.
+                    state.processedRows ? h('td', { class: 'px-2 py-1 text-right' },
+                      (() => {
+                        const btn = h('button', {
+                          class: 'rounded p-1 text-theme-muted hover:bg-theme-bg-soft hover:text-theme-primary transition-all focus:outline-none',
+                          title: 'Copy respondent markers',
+                          onclick: () => {
+                            navigator.clipboard.writeText(String(row[outputCol] || ''));
+                            btn.textContent = '✓'; btn.className = 'rounded p-1 text-theme-success font-bold';
+                            Toast.show('Copied row markers to clipboard', 'success');
+                            setTimeout(() => { btn.textContent = '⧉'; btn.className = 'rounded p-1 text-theme-muted hover:bg-theme-bg-soft hover:text-theme-primary'; }, 1000);
+                          }
+                        }, '⧉');
+                        return btn;
+                      })()
+                    ) : null
+                  ))
+                )
+              )
+            )
+          ),
+
+          // Pagination footer: "Showing X - Y of Z" + prev/next
+          h('div', { class: 'flex items-center justify-between rounded-xl border border-theme-border bg-theme-card px-3 py-2 text-xs font-medium text-theme-text shadow-2xs' },
+            h('span', {}, `Showing ${(state.currentPage - 1) * ROWS_PER_PAGE + 1} - ${Math.min(state.currentPage * ROWS_PER_PAGE, filteredRows.length)} of ${filteredRows.length} rows`),
+            h('div', { class: 'flex items-center gap-1' },
+              h('button', {
+                class: 'rounded-md border border-theme-border px-2 py-1 hover:bg-theme-bg-soft disabled:opacity-40 focus:outline-none',
+                disabled: state.currentPage <= 1, onclick: () => { state.currentPage--; App.Render(); }
+              }, 'Previous'),
+              h('span', { class: 'px-2' }, `${state.currentPage} / ${totalPages}`),
+              h('button', {
+                class: 'rounded-md border border-theme-border px-2 py-1 hover:bg-theme-bg-soft disabled:opacity-40 focus:outline-none',
+                disabled: state.currentPage >= totalPages, onclick: () => { state.currentPage++; App.Render(); }
+              }, 'Next')
+            )
+          )
+        );
+      },
+
+      /**
+       * SUMMARY TAB: marker frequency table with CSS bar charts, optional
+       * cross-variable breakdown, and a ready-to-paste Decipher XML block.
+       */
+      renderSummaryPanel(counts) {
+        // Empty state — user hasn't processed the dataset yet
+        if (!state.processedRows) {
+          return h('div', { class: 'rounded-xl border border-theme-border bg-theme-card p-8 text-center text-xs text-theme-muted' }, 'Click "Process Markers" above to generate output distribution statistics.');
+        }
+
+        const totalRows = state.processedRows.length;
+        const sortedCounts = [...counts.entries()].sort((a, b) => b[1] - a[1]); // most frequent first
+
+        return h('div', { class: 'space-y-4' },
+          h('div', { class: 'rounded-xl border border-theme-border bg-theme-card p-3.5 shadow-2xs' },
+            h('div', { class: 'mb-3 flex items-center justify-between' },
+              h('h3', { class: 'text-xs font-bold uppercase tracking-wider text-theme-text' }, 'Marker Quota Distribution'),
+              h('button', {
+                class: 'rounded-lg bg-theme-bg-soft border border-theme-border px-3 py-1.5 text-xs font-semibold text-theme-text hover:bg-theme-border transition-all focus:outline-none',
+                onclick: () => Exporter.exportSummaryReport()
+              }, '⬇ Export Summary (.xlsx)')
+            ),
+            h('div', { class: 'max-h-[45vh] overflow-auto rounded-lg border border-theme-border' },
+              h('table', { class: 'w-full text-[11px]' },
+                h('thead', { class: 'sticky top-0 bg-theme-table-header' },
+                  h('tr', {}, ['Marker Path', 'Count', 'Share', 'Distribution Bar'].map(t => h('th', { class: `whitespace-nowrap px-3 py-2 text-left font-bold text-theme-text ${t === 'Count' || t === 'Share' ? 'text-right' : ''}` }, t)))
+                ),
+                h('tbody', { class: 'divide-y divide-theme-border/40' },
+                  sortedCounts.map(([marker, count]) => {
+                    const pct = ((count / (totalRows || 1)) * 100).toFixed(1); // || 1 avoids /0
+                    // HEURISTIC: >3 path segments → treat as a crossed marker (purple)
+                    const isCrossed = state.crossEnabled && marker.split('/').length > 3;
+                    return h('tr', { class: 'hover:bg-theme-hover' },
+                      h('td', { class: `px-3 py-1.5 mono font-medium break-all ${isCrossed ? 'text-theme-cross' : 'text-theme-text'}` }, marker),
+                      h('td', { class: 'px-3 py-1.5 text-right mono font-bold text-theme-text' }, String(count)),
+                      h('td', { class: 'px-3 py-1.5 text-right mono text-theme-muted' }, `${pct}%`),
+                      // Pure-CSS bar chart: inner div width = percentage share
+                      h('td', { class: 'px-3 py-1.5 w-2/5' },
+                        h('div', { class: 'h-2 w-full overflow-hidden rounded-full bg-theme-bg-soft' },
+                          h('div', { class: `h-full rounded-full ${isCrossed ? 'bg-theme-cross' : 'bg-theme-primary'}`, style: `width:${pct}%` })
+                        )
+                      )
+                    );
+                  })
+                )
+              )
+            )
+          ),
+
+          // Cross-variable breakdown chips (only when crossing is active)
+          (() => {
+            const crossDist = App.Helpers.getCrossDistribution();
+            if (!state.crossEnabled || crossDist.length === 0) return null;
+            return h('div', { class: 'rounded-xl border border-theme-border bg-theme-card p-3.5 shadow-2xs' },
+              h('h3', { class: 'mb-2.5 text-xs font-bold uppercase tracking-wider text-theme-text' }, `Cross Variable Breakdown (${state.crossCol})`),
+              h('div', { class: 'flex flex-wrap gap-1.5' },
+                crossDist.map(d => {
+                  const share = ((d.count / totalRows) * 100).toFixed(1);
+                  return h('span', { class: 'rounded-lg bg-theme-bg-soft border border-theme-border px-2.5 py-1 mono text-xs text-theme-text' },
+                    h('b', {}, d.value), `: ${d.count} (${share}%)`
+                  );
+                })
+              )
+            );
+          })(),
+
+          // Decipher XML generator: one <marker> element per unique marker.
+          // Element names must not contain "/", so path slashes are collapsed
+          // into underscores: /B6Quota/B6r1 → B6Quota_B6r1
+          (() => {
+            let xml = '<quota label="q_markers" overquota="no" sheet="q_markers">\n';
+            sortedCounts.forEach(([m]) => {
+              const cleanName = m.replace(/^\/+|\/+$/g, '').replace(/\//g, '_'); // strip edge slashes, replace inner ones
+              xml += `  <marker name="${cleanName}" condition="1">${m}</marker>\n`;
+            });
+            xml += '</quota>';
+
+            return h('div', { class: 'rounded-xl border border-theme-border bg-theme-bg-soft p-3.5 shadow-2xs' },
+              h('div', { class: 'mb-2 flex items-center justify-between' },
+                h('h3', { class: 'text-xs font-bold uppercase tracking-wider text-theme-text' }, 'Survey Script Generator (Decipher XML)'),
+                h('button', {
+                  class: 'rounded-lg bg-theme-primary px-3 py-1 text-xs font-semibold text-white hover:bg-theme-primary-hover transition-all focus:outline-none',
+                  onclick: () => { navigator.clipboard.writeText(xml); Toast.show('Copied Decipher XML block to clipboard', 'success'); }
+                }, '📋 Copy XML Block')
+              ),
+              // <pre> renders XML as-is; content added as a text node via h(), so it's auto-escaped
+              h('pre', { class: 'max-h-36 overflow-auto rounded-lg border border-theme-border bg-theme-card p-2.5 text-[10px] mono text-theme-text' }, xml)
+            );
+          })()
+        );
+      },
+
+      // Diagnostics tab: green "all clear" banner or a color-coded issue list
+      renderDiagnosticsPanel(issuesList) {
+        return h('div', { class: 'rounded-xl border border-theme-border bg-theme-card p-3.5 shadow-2xs' },
+          issuesList.length === 0
+            ? h('div', { class: 'rounded-xl bg-theme-success-bg border border-theme-success/30 px-4 py-3 text-xs font-bold text-theme-success' }, '✓ Zero formatting or mapping diagnostics detected. Clean dataset.')
+            : h('ul', { class: 'space-y-2 text-xs font-medium' },
+                issuesList.map(item => h('li', {
+                  class: `rounded-xl px-3 py-2.5 border flex items-start gap-2 ${item.type === 'warn' ? 'bg-theme-warning-bg text-theme-warning border-theme-warning/30' : 'bg-theme-bg-soft text-theme-text border-theme-border'}`
+                }, h('span', { class: 'font-bold uppercase text-[10px] shrink-0 mt-0.5' }, `[${item.type}]`), item.message))
+              )
+        );
+      }
+    };
+
+    /* -------------------------------------------------------------------------
+       PUBLIC API — only these members are reachable from outside the IIFE.
+       ------------------------------------------------------------------------- */
+    return {
+      Helpers: {
+        getCurrentSheet() { return state.sheets.find(s => s.name === state.activeSheet); },
+
+        // Tallies how many respondents carry each unique marker.
+        // Recomputed per render — acceptable for typical dataset sizes.
+        getMarkerCounts() {
+          if (!state.processedRows) return new Map();
+          const counts = new Map();
+          const outputCol = state.markersCol.trim() || 'markers';
+          for (const row of state.processedRows) {
+            const val = row[outputCol]; if (!val) continue;
+            for (const marker of String(val).split(',').map(x => x.trim()).filter(Boolean)) counts.set(marker, (counts.get(marker) || 0) + 1);
+          }
+          return counts;
+        },
+
+        // Value frequency of the cross column ('' and '0' skipped as N.A.).
+        // Sort: numeric values sort numerically (1, 2, 10 — not 1, 10, 2),
+        // non-numeric fall back to locale-aware string comparison.
+        getCrossDistribution() {
+          const sheet = this.getCurrentSheet();
+          if (!sheet || !state.crossEnabled || !sheet.headers.includes(state.crossCol)) return [];
+          const counts = new Map();
+          for (const r of sheet.rows) {
+            const v = r[state.crossCol]; if (v === '' || v === null || v === undefined) continue;
+            const s = String(v).trim(); if (s === '0') continue; counts.set(s, (counts.get(s) || 0) + 1);
+          }
+          return [...counts.entries()].map(([value, count]) => ({ value, count })).sort((a, b) => {
+            const na = Number(a.value), nb = Number(b.value);
+            if (!isNaN(na) && !isNaN(nb)) return na - nb;
+            return String(a.value).localeCompare(String(b.value));
+          });
+        },
+
+        // QA checks (run only after processing):
+        //   1. warn  — enabled prefix rule matched 0 columns
+        //   2. info  — respondents ending up with zero markers
+        //   3. warn  — markers containing "/" but not STARTING with "/"
+        //              (violates Decipher's absolute-path naming convention)
+        getDiagnostics() {
+          const sheet = this.getCurrentSheet(); const out = [];
+          if (!state.processedRows || !sheet) return out;
+          for (const rule of state.rules) {
+            if (!rule.enabled) continue;
+            if (rule.mode === 'prefix' && rule.colPrefix && !sheet.headers.some(h => h.startsWith(rule.colPrefix))) out.push({ type: 'warn', message: `Rule prefix "${rule.colPrefix}" matched 0 columns in the current dataset.` });
+          }
+          const outputCol = state.markersCol.trim() || 'markers';
+          let zeroCount = 0;
+          for (const row of state.processedRows) if (!String(row[outputCol] || '').trim()) zeroCount++;
+          if (zeroCount) out.push({ type: 'info', message: `${zeroCount} respondent rows resulted in 0 output markers.` });
+          let badSlash = 0;
+          for (const m of this.getMarkerCounts().keys()) if (m.includes('/') && !m.startsWith('/')) badSlash++;
+          if (badSlash) out.push({ type: 'warn', message: `${badSlash} output marker(s) contain "/" but do not begin with "/" (Decipher naming violation).` });
+          return out;
+        }
+      },
+
+      // Mobile drawer control. Open() also (re)renders the sidebar into the
+      // drawer slot so its content is always fresh with current state.
+      Navigation: {
+        openSidebar() {
+          state.sidebarOpen = true; document.body.classList.add('sidebar-open'); // lock body scroll
+          document.getElementById('sidebarBackdrop').classList.remove('hidden-backdrop');
+          document.getElementById('sidebarPanel').classList.remove('off-screen'); // triggers CSS slide-in
+          const sheet = App.Helpers.getCurrentSheet();
+          if (sheet) { const sc = document.getElementById('mobileSidebarContent'); sc.innerHTML = ''; sc.appendChild(Components.renderSidebar(sheet)); }
+        },
+        closeSidebar() {
+          state.sidebarOpen = false; document.body.classList.remove('sidebar-open');
+          document.getElementById('sidebarBackdrop').classList.add('hidden-backdrop');
+          document.getElementById('sidebarPanel').classList.add('off-screen'); // CSS slide-out
+        }
+      },
+
+      /**
+       * MASTER RENDER — full teardown-and-rebuild of #app.
+       * Simple and bug-resistant (UI can never drift out of sync with state),
+       * at the cost of losing input focus/scroll position on re-render.
+       * That's exactly why text inputs defer Render() to their onchange (blur).
+       */
+      Render() {
+        StorageEngine.save(); Components.renderHeaderActions();
+        const appEl = document.getElementById('app'); appEl.innerHTML = '';
+        // Hamburger is only relevant once a file is loaded
+        const sidebarToggle = document.getElementById('sidebarToggle');
+        if (sidebarToggle) sidebarToggle.style.display = state.workbook ? '' : 'none';
+
+        if (!state.workbook) { appEl.appendChild(Components.renderUploadScreen()); return; }
+        const currentSheet = App.Helpers.getCurrentSheet(); if (!currentSheet) return;
+
+        // Desktop layout: fixed-width sticky sidebar + fluid main area.
+        // minmax(0,1fr) prevents wide tables from blowing the grid open.
+        const grid = h('div', { class: 'grid gap-5 lg:grid-cols-[340px_minmax(0,1fr)] xl:grid-cols-[360px_minmax(0,1fr)] items-start' });
+        const desktopSidebar = h('div', { class: 'hidden lg:block sticky top-16' }); // top-16 clears the sticky header
+        desktopSidebar.appendChild(Components.renderSidebar(currentSheet));
+        grid.appendChild(desktopSidebar);
+
+        grid.appendChild(Components.renderMainWorkspace(currentSheet, ProcessingEngine.buildMergedMap(currentSheet), App.Helpers.getMarkerCounts()));
+        appEl.appendChild(grid);
+
+        // If the mobile drawer is open, refresh its copy of the sidebar too
+        if (state.sidebarOpen) { const sc = document.getElementById('mobileSidebarContent'); sc.innerHTML = ''; sc.appendChild(Components.renderSidebar(currentSheet)); }
+      },
+
+      /**
+       * BOOTSTRAP — load saved config, first render, wire global events.
+       *
+       * Drag & drop uses a DEPTH COUNTER because dragenter/dragleave fire for
+       * every child element the cursor crosses. Only hiding the overlay when
+       * depth returns to 0 prevents flicker as the cursor moves over children.
+       *
+       * dragover MUST call preventDefault(), otherwise the browser navigates
+       * to the dropped file instead of firing our 'drop' handler.
+       */
+      Init() {
+        StorageEngine.load(); this.Render();
+        const overlay = document.getElementById('dropOverlay'); let dragDepth = 0;
+        window.addEventListener('dragenter', (e) => { if (!e.dataTransfer?.types.includes('Files')) return; dragDepth++; overlay.classList.remove('hidden'); overlay.style.display = 'flex'; });
+        window.addEventListener('dragleave', () => { dragDepth = Math.max(0, dragDepth - 1); if (dragDepth === 0) { overlay.classList.add('hidden'); overlay.style.display = 'none'; } });
+        window.addEventListener('dragover', (e) => e.preventDefault());
+        window.addEventListener('drop', (e) => { e.preventDefault(); dragDepth = 0; overlay.classList.add('hidden'); overlay.style.display = 'none'; const file = e.dataTransfer.files?.[0]; if (file) ProcessingEngine.parseFile(file); });
+        // Keyboard accessibility: Escape closes the mobile drawer
+        window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && state.sidebarOpen) App.Navigation.closeSidebar(); });
+      }
+    };
+  })();
+
+  // Start the app once the DOM is ready (theme was already applied earlier
+  // in <head> to prevent a flash of unthemed content)
+  window.addEventListener('DOMContentLoaded', () => App.Init());
+  </script>
+</body>
+</html>
